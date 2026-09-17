@@ -3,6 +3,7 @@ import bcrypt from "bcrypt";
 
 export interface IUser extends Document {
     email: string;
+    name: string;
     password?: string;
     isVerified: boolean;
     emailVerificationToken?: string;
@@ -23,6 +24,15 @@ const userSchema = new Schema<IUser>(
       lowercase: true,
       trim: true,
       index: true,
+    },
+    name: {
+      type: String,
+      required: [true, 'Name is required'],
+      trim: true,
+      minlength: [3, 'Name must be at least 3 characters long'],
+      maxlength: [50, 'Name cannot exceed 50 characters'],
+      lowercase: true,
+      match: [/^[a-zA-Z\s]+$/, 'Name can only contain alphabets and spaces']
     },
     password: {
       type: String,
