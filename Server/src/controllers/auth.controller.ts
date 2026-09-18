@@ -5,6 +5,8 @@ import { User } from "../models/user.model";
 import { generateRandomToken } from "../utils/crypto";
 import { ENV } from "../config/env";
 import { sendEmail } from "../utils/email";
+import { signAccessToken, signRefreshToken } from "../utils/jwt";
+import redisClient from "../config/redis";
 
 
 export const registerSchema = z.object({
@@ -172,6 +174,50 @@ export class AuthController {
         } catch (error) {
             console.error('Error in verifyEmail controller:', error);
             next(error);
+        }
+    }
+
+    static async login(req: Request, res: Response, next: NextFunction): Promise<void> {
+        try {
+            const { email, password } = req.body;
+
+            const user = await User.findOne({ email }).select('+password');
+            if (!user) {
+                res.status(401).json({
+                    success: 'error',
+                    message: 'Invalid credentials'
+                });
+                return;
+            }
+
+            const accessToken = signAccessToken({ userId: user._id.toString(), email: user.email });
+            const refreshToken = signRefreshToken({ userId: user._id.toString(), email: user.email })
+
+            redisClient.set(
+                `refresh_session:${user._id.toString()}:${refreshToken}`,
+                '1',
+                'EX',
+                7 * 24 * 60 * 60
+            );
+
+            res.cookie('refreshToken', refreshToken, {
+                httpOnly: true,
+                secure: ENV.NODE_ENV === 'production',
+                sameSite: 'strict',
+                maxAge: REFRESH_TOKEN_MAX_AGE_MS
+            });
+
+            res.status(200).json({
+                status: 'success',
+                message: 'Login successfully',
+                data: {
+                    accessToken,
+                    user: { id: user._id, email: user.email },
+                },
+            });
+        } catch (error) {
+           console.error('Error in login controller', error);
+           next(error);
         }
     }
 }
