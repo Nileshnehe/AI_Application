@@ -2,7 +2,7 @@ import { Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import crypto from 'crypto'
 import { User } from "../models/user.model";
-import { generateRandomToken } from "../utils/crypto";
+import { generateRandomToken, hashToken } from "../utils/crypto";
 import { ENV } from "../config/env";
 import { sendEmail } from "../utils/email";
 import { signAccessToken, signRefreshToken } from "../utils/jwt";
@@ -182,7 +182,7 @@ export class AuthController {
             const { email, password } = req.body;
 
             const user = await User.findOne({ email }).select('+password');
-            if (!user) {
+            if (!user || !(await user.comparePassword(password))) {
                 res.status(401).json({
                     success: 'error',
                     message: 'Invalid credentials'
@@ -193,7 +193,7 @@ export class AuthController {
             const accessToken = signAccessToken({ userId: user._id.toString(), email: user.email });
             const refreshToken = signRefreshToken({ userId: user._id.toString(), email: user.email })
 
-            redisClient.set(
+            await redisClient.set(
                 `refresh_session:${user._id.toString()}:${refreshToken}`,
                 '1',
                 'EX',
@@ -216,10 +216,86 @@ export class AuthController {
                 },
             });
         } catch (error) {
-           console.error('Error in login controller', error);
-           next(error);
+            console.error('Error in login controller', error);
+            next(error);
+        }
+    }
+
+    static async forgotPassword(req: Request, res: Response, next: NextFunction): Promise<void> {
+        try {
+            const { email } = req.body;
+            const user = await User.findOne({ email });
+
+            if (!user) {
+                res.status(200).json({
+                    status: 'success',
+                    message: 'If an account exists with this email, a password reset link has been dispatched.',
+                });
+                return;
+            }
+
+            const { rawToken, hashedToken } = generateRandomToken();
+            user.passwordResetToken = hashedToken;
+            user.passwordResetExpires = new Date(Date.now() + 15 * 60 * 1000);
+            await user.save();
+
+            const resetUrl = `${ENV.CLIENT_URL}/reset-password?token=${rawToken}&email=${encodeURIComponent(user.email)}`;
+
+            await sendEmail({
+                to: user.email,
+                subject: 'Password Reset Request',
+                html: `<p>Reset your password by visiting <a href="${resetUrl}">this link</a>. Valid for 15 minutes.</p>`,
+            });
+
+            res.status(200).json({
+                status: 'success',
+                message: 'If an account with this email, a password link has been dispatched.',
+            });
+
+        } catch (error) {
+            console.error('Error in forgotPassword controller:', error);
+            next(error);
+        }
+    }
+
+    static async resetPassword(req: Request, res: Response, next: NextFunction): Promise<void> {
+        try {
+            const { token, password } = req.body;
+            const hashed = hashToken(token);
+
+            const user = await User.findOne({
+                passwordResetToken: hashed,
+                passwordResetExpires: { $gt: new Date() },
+            }).select('+passwordResetToken +passwordResetExpires');
+
+            if (!user) {
+                res.status(400).json({
+                    success: 'error',
+                    message: 'Token is invalid or expired'
+                });
+                return;
+            }
+
+            user.password = password;
+            user.passwordResetToken = undefined;
+            user.passwordResetExpires = undefined;
+            await user.save();
+
+            const stream = redisClient.scanStream({ match: `refresh_session:${user._id.toString()}:*` });
+            stream.on('data', (keys: string[]) => {
+                if (keys.length) redisClient.del(...keys);
+            });
+
+            res.status(200).json({
+                status: 'success',
+                message: 'Password updated. Please log in with new credentials.'
+            });
+        } catch (error) {
+            console.error('Error in resetPassword:', error);
+            next(error);
         }
     }
 }
+
 
 
