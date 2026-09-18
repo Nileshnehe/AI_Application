@@ -5,7 +5,7 @@ import { User } from "../models/user.model";
 import { generateRandomToken, hashToken } from "../utils/crypto";
 import { ENV } from "../config/env";
 import { sendEmail } from "../utils/email";
-import { signAccessToken, signRefreshToken } from "../utils/jwt";
+import { signAccessToken, signRefreshToken, verifyRefreshToken } from "../utils/jwt";
 import redisClient from "../config/redis";
 
 
@@ -118,64 +118,38 @@ export class AuthController {
     }
 
     static async verifyEmail(req: Request, res: Response, next: NextFunction): Promise<void> {
-        try {
-            const { email, token } = req.body;
+    try {
+      const { token, email } = req.query;
 
-            const user = await User.findOne({ email }).select('+emailVerificationToken +emailVerificationExpires');
-            if (!user) {
-                res.status(404).json({
-                    status: 'error',
-                    message: 'User not found'
-                });
-                return;
-            }
+      if (!token || !email || typeof token !== 'string' || typeof email !== 'string') {
+        res.status(400).json({ status: 'error', message: 'Invalid verification query parameters' });
+        return;
+      }
 
-            if (user.isVerified) {
-                res.status(400).json({
-                    status: 'error',
-                    message: 'User already verified'
-                });
-                return;
-            }
+      const hashedToken = hashToken(token);
 
-            const hashedToken = crypto.createHash('sha256').update(token).digest('hex');
+      const user = await User.findOne({
+        email,
+        emailVerificationToken: hashedToken,
+        emailVerificationExpires: { $gt: new Date() },
+      }).select('+emailVerificationToken +emailVerificationExpires');
 
-            // console.log("1. Token received from Postman:", token);
-            // console.log("2. After the hash is:", hashedToken);
-            // console.log("3. Database saved Token:", user.emailVerificationToken);
+      if (!user) {
+        res.status(400).json({ status: 'error', message: 'Invalid or expired verification token' });
+        return;
+      }
 
-            if (user.emailVerificationToken !== hashedToken) {
-                res.status(400).json({
-                    status: 'error',
-                    message: 'Invalid or expired verification token'
-                });
-                return;
-            }
+      user.isVerified = true;
+      user.emailVerificationToken = undefined;
+      user.emailVerificationExpires = undefined;
+      await user.save();
 
-            if (user.emailVerificationExpires && user.emailVerificationExpires < new Date()) {
-                res.status(400).json({
-                    status: 'error',
-                    message: 'Verification token has been expired. Please register again'
-                });
-                return;
-            }
-
-            user.isVerified = true;
-            user.emailVerificationToken = undefined;
-            user.emailVerificationExpires = undefined;
-
-            await user.save();
-
-            res.status(200).json({
-                status: 'success',
-                message: 'Email verified successfully. You can login now'
-            });
-
-        } catch (error) {
-            console.error('Error in verifyEmail controller:', error);
-            next(error);
-        }
+      res.status(200).json({ status: 'success', message: 'Email verified successfully. You can now log in.' });
+    } catch (error) {
+      console.error('Error in verifyEmail controller:', error)
+      next(error);
     }
+  }
 
     static async login(req: Request, res: Response, next: NextFunction): Promise<void> {
         try {
@@ -291,7 +265,84 @@ export class AuthController {
                 message: 'Password updated. Please log in with new credentials.'
             });
         } catch (error) {
-            console.error('Error in resetPassword:', error);
+            console.error('Error in resetPassword controller:', error);
+            next(error);
+        }
+    }
+
+    static async refresh(req: Request, res: Response, next: NextFunction): Promise<void> {
+        try {
+            const token = req.cookies.refreshToken;
+            if (!token) {
+                res.status(401).json({ status: 'error', message: 'Missing refresh token' });
+                return;
+            }
+
+            const payload = verifyRefreshToken(token);
+            const sessionKey = `refresh_session:${payload.userId}:${token}`;
+            const sessionExists = await redisClient.get(sessionKey);
+
+            if (!sessionExists) {
+                res.status(401).json({ status: 'error', message: 'Invalid or revoked refresh session' });
+                return;
+            }
+
+            // Rotate Refresh Token
+            await redisClient.del(sessionKey);
+            const newAccessToken = signAccessToken({ userId: payload.userId, email: payload.email });
+            const newRefreshToken = signRefreshToken({ userId: payload.userId, email: payload.email });
+
+            await redisClient.set(
+                `refresh_session:${payload.userId}:${newRefreshToken}`,
+                '1',
+                'EX',
+                7 * 24 * 60 * 60
+            );
+
+            res.cookie('refreshToken', newRefreshToken, {
+                httpOnly: true,
+                secure: ENV.NODE_ENV === 'production',
+                sameSite: 'strict',
+                maxAge: REFRESH_TOKEN_MAX_AGE_MS,
+            });
+
+            res.status(200).json({
+                status: 'success',
+                data: { accessToken: newAccessToken },
+            });
+        } catch {
+            res.status(401).json({
+                status: 'error',
+                message: 'Expired or malformed refresh token'
+            });
+        }
+    }
+
+    static async logout(req: Request, res: Response, next: NextFunction): Promise<void> {
+        try {
+            const token = req.cookies.refreshToken;
+
+            if (token) {
+                try {
+                    const payload = verifyRefreshToken(token);
+                    await redisClient.del(`refresh_session:${payload.userId}:${token}`);
+                } catch (error) {
+                    console.warn('Ignored error during logout token verification:', error);
+                }
+            }
+
+            res.clearCookie('refreshToken', {
+                httpOnly: true,
+                secure: ENV.NODE_ENV === 'production',
+                sameSite: 'strict',
+            });
+
+            res.status(200).json({
+                status: 'success',
+                message: 'Logged out successfully'
+            });
+        } catch (error) {
+            console.error('Error in logout controller:', error);
             next(error);
         }
     }
