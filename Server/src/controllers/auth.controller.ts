@@ -1,6 +1,5 @@
 import { Request, Response, NextFunction } from "express";
 import { z } from "zod";
-import crypto from 'crypto'
 import { User } from "../models/user.model";
 import { generateRandomToken, hashToken } from "../utils/crypto";
 import { ENV } from "../config/env";
