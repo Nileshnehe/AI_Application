@@ -1,0 +1,16 @@
+version: '3.8'
+services:
+  backend-app:
+    build: .
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env
+    depends_on:
+      - redis-server
+
+  redis-server:
+    image: redis:alpine
+    ports:
+      - "6379:6379"    
+    
