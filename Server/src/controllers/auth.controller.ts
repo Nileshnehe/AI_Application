@@ -6,6 +6,7 @@ import { ENV } from "../config/env";
 import { sendEmail } from "../utils/email";
 import { signAccessToken, signRefreshToken, verifyRefreshToken } from "../utils/jwt";
 import redisClient from "../config/redis";
+import { AuthenticatedRequest } from "../types/auth.types";
 
 
 export const registerSchema = z.object({
@@ -23,6 +24,9 @@ export const registerSchema = z.object({
         .regex(/[0-9]/, 'Password must contain at least one number'),
 });
 
+export const getProfileSchema = z.object({
+    userId: z.string()
+})
 export const loginSchema = z.object({
     email: z.string().email(),
     password: z.string(),
@@ -117,38 +121,38 @@ export class AuthController {
     }
 
     static async verifyEmail(req: Request, res: Response, next: NextFunction): Promise<void> {
-    try {
-      const { token, email } = req.query;
+        try {
+            const { token, email } = req.query;
 
-      if (!token || !email || typeof token !== 'string' || typeof email !== 'string') {
-        res.status(400).json({ status: 'error', message: 'Invalid verification query parameters' });
-        return;
-      }
+            if (!token || !email || typeof token !== 'string' || typeof email !== 'string') {
+                res.status(400).json({ status: 'error', message: 'Invalid verification query parameters' });
+                return;
+            }
 
-      const hashedToken = hashToken(token);
+            const hashedToken = hashToken(token);
 
-      const user = await User.findOne({
-        email,
-        emailVerificationToken: hashedToken,
-        emailVerificationExpires: { $gt: new Date() },
-      }).select('+emailVerificationToken +emailVerificationExpires');
+            const user = await User.findOne({
+                email,
+                emailVerificationToken: hashedToken,
+                emailVerificationExpires: { $gt: new Date() },
+            }).select('+emailVerificationToken +emailVerificationExpires');
 
-      if (!user) {
-        res.status(400).json({ status: 'error', message: 'Invalid or expired verification token' });
-        return;
-      }
+            if (!user) {
+                res.status(400).json({ status: 'error', message: 'Invalid or expired verification token' });
+                return;
+            }
 
-      user.isVerified = true;
-      user.emailVerificationToken = undefined;
-      user.emailVerificationExpires = undefined;
-      await user.save();
+            user.isVerified = true;
+            user.emailVerificationToken = undefined;
+            user.emailVerificationExpires = undefined;
+            await user.save();
 
-      res.status(200).json({ status: 'success', message: 'Email verified successfully. You can now log in.' });
-    } catch (error) {
-      console.error('Error in verifyEmail controller:', error)
-      next(error);
+            res.status(200).json({ status: 'success', message: 'Email verified successfully. You can now log in.' });
+        } catch (error) {
+            console.error('Error in verifyEmail controller:', error)
+            next(error);
+        }
     }
-  }
 
     static async login(req: Request, res: Response, next: NextFunction): Promise<void> {
         try {
@@ -314,6 +318,35 @@ export class AuthController {
                 status: 'error',
                 message: 'Expired or malformed refresh token'
             });
+        }
+    }
+
+    static async getProfile(req: AuthenticatedRequest, res: Response): Promise<void> {
+        try {
+            const userId = req.user?.userId;
+
+            const user = await User.findById(userId);
+            if (!user) {
+                res.status(404).json({
+                    message: 'User not found'
+                });
+                return;
+            }
+
+            res.status(200).json({
+                success: true,
+                message: 'User fetched successfully',
+                user: {
+                    id: user._id,
+                    name: user.name,
+                    email: user.email,
+                    isVerified: user.isVerified
+                }
+            });
+
+        } catch (error) {
+            console.error('Error in getProfile:', error);
+            res.status(500).json({ message: 'Internal server error while fetching profile' });
         }
     }
 
